@@ -1,0 +1,97 @@
+language: php
+
+php:
+  - 5.4
+
+mysql:
+  database: drupal
+  username: root
+  encoding: utf8
+
+env:
+  - UPGRADE=none
+  - UPGRADE=7.x-1.0-rc3
+
+install:
+  - sudo apt-get update > /dev/null
+  - "mysql -e 'create database drupal;'"
+
+  # Install the latest Drush 6.
+  - export PATH="$HOME/.composer/vendor/bin:$PATH"
+  - composer global require drush/drush:6.*
+
+  # Build Behat dependencies
+  - cd ./tests/behat
+  - composer install --no-interaction
+  # - cp behat.template.yml behat.local.yml
+  - cd ../../../
+
+  # Build Codebase
+  - mkdir private_files
+  - mkdir profiles
+  - mv openacademy profiles/
+  - mkdir drupal
+  - mv profiles drupal/
+
+  # Test the current branch
+  - cd drupal
+  - drush make --yes profiles/openacademy/drupal-org-core.make --prepare-install
+  - drush make --yes profiles/openacademy/drupal-org.make --no-core --contrib-destination=profiles/openacademy
+  - drush dl panopoly_demo
+  - cd ../
+
+  # Download an old version to test upgrading from.
+  - if [[ "$UPGRADE" != none ]]; then drush dl openacademy-$UPGRADE; fi
+
+  # Setup files
+  - sudo chmod -R 777 drupal/sites/all
+
+  # Setup display for Selenium
+  - export DISPLAY=:99.0
+  - sh -e /etc/init.d/xvfb start
+  - sleep 5
+
+  # Get Selenium
+  - wget http://selenium.googlecode.com/files/selenium-server-standalone-2.37.0.jar
+  - java -jar selenium-server-standalone-2.37.0.jar > /dev/null 2>&1 &
+  - sleep 5
+ 
+  # Disable sendmail
+  - echo sendmail_path=`which true` >> ~/.phpenv/versions/$(phpenv version-name)/etc/php.ini
+
+before_script:
+
+  # Hack to get the correct version of Panopoly Demo
+  # (openacademy-7.x-1.0-rc3 used panopoly_demo-7.x-1.0-rc5)
+  - UPGRADE_DEMO_VERSION=`echo $UPGRADE | sed -e s/^7.x-//`
+  - case $UPGRADE_DEMO_VERSION in 1.0-rc[45]) UPGRADE_DEMO_VERSION=1.0-rc3;; esac
+
+  # Do the site install (either the current revision or old for the upgrade).
+  - if [[ "$UPGRADE" == none ]]; then cd drupal; else cd openacademy-$UPGRADE; drush dl panopoly_demo-$UPGRADE_DEMO_VERSION; fi
+  - drush si openacademy --db-url=mysql://root:@127.0.0.1/drupal --account-name=admin --account-pass=admin --site-mail=admin@example.com --site-name="Open Acedemy" --yes
+  - cd ../drupal
+
+  # If we're an upgrade test, run the upgrade process.
+  - if [[ "$UPGRADE" != none ]]; then cp -a ../openacademy-$UPGRADE/sites/default/* sites/default/ && drush updb --yes; fi
+
+  # Enable the Panopoly Demo app
+  - drush en panopoly_demo -y
+
+  - drush runserver --server=builtin 8888 > /dev/null 2>&1 &
+  - sleep 5
+  - curl http://127.0.0.1:8888/ > /dev/null 2>&1
+  - cd profiles/openacademy/tests/behat
+
+script:
+
+  - ./bin/behat --config behat.travis.yml
+
+notifications:
+  campfire:
+    rooms:
+      - secure: "OffOBVRIoUefh1rRDFmvaM4JJGac0Uu6WqBaEJIJhSziuLd4T8pYPTs4JtnCjw6pNX9pWlnuZvhRjYSvf6rDYc41A2R5yH34OIZ1BRUyYpn13Cv/xStMQPdnIFi61PL1UZdXpZl4dlZXgCGtlitSdz/Vrn6ejorRFN7FhyeadpY="
+    template:
+      - "%{repository} (%{commit}) : %{message} %{foo} "
+      - "Build details: %{build_url}"
+    on_success: always
+    on_failure: always

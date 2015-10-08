@@ -1,0 +1,352 @@
+<?php
+
+/**
+ * @file
+ * Installation code for OpenAcademy.
+ */
+
+/**
+* Implements hook_requirements().
+* Set minimum 'max_execution_time' requirement
+*/
+function openacademy_requirements($phase) {
+  $requirements = array();
+  // Ensure translations don't break during installation.
+  $t = get_t();
+  if ($phase == 'install') {
+    // Test PHP minimum execution time
+    $requirements['php_max_execution_time'] = array(
+      'title' => $t('PHP Max Execution Time'),
+      'value' => ini_get('max_execution_time'),
+    );
+    $max_execution_time = (int)ini_get('max_execution_time');
+    // Don't set the error when max_execution_time is 0 (Infinite).
+    if ($max_execution_time && $max_execution_time < DRUPAL_MINIMUM_MAX_EXECUTION_TIME) {
+      $requirements['php_max_execution_time']['description'] = $t('Your PHP execution time is too low, please set it greater than or equal to %time seconds.', array('%time' => DRUPAL_MINIMUM_MAX_EXECUTION_TIME));
+      $requirements['php_max_execution_time']['severity'] = REQUIREMENT_ERROR;
+    }
+  }
+  return $requirements;
+}
+
+/**
+ * Implements hook_install_tasks()
+ */
+function openacademy_install_tasks($install_state) {
+  // Increase maximum function nesting level to prevent install errors.
+  $max_nesting_level = ini_get('xdebug.max_nesting_level');
+  if ($max_nesting_level > 0 && $max_nesting_level <= '200') {
+    ini_set('xdebug.max_nesting_level', 200);
+  }
+
+  // Try to increase the timeout value.
+  $max_execution_time = (int)ini_get('max_execution_time');
+  if ($max_execution_time && $max_execution_time < 240) {
+    drupal_set_time_limit(240);
+  }
+
+  // Remove any status messages that might have been set. They are unneeded.
+  drupal_get_messages('status', TRUE);
+
+  $tasks = array();
+
+  // Set up the Open Academy Apps install task
+  $openacademy_server = array(
+    'machine name' => 'local',
+    'default apps' => array(
+      'openacademy_core',
+      'openacademy_news',
+      'openacademy_events',
+      'openacademy_publications',
+      'openacademy_courses',
+      'openacademy_people',
+    ),
+    'required apps' => array(
+      'openacademy_core',
+    ),
+    'default content callback' => 'openacademy_default_content',
+  );
+  require_once(drupal_get_path('module', 'apps') . '/apps.profile.inc');
+  $tasks = $tasks + apps_profile_install_tasks($install_state, $openacademy_server);
+
+  // Add the Panopoly theme selection to the installation process
+  require_once(drupal_get_path('module', 'panopoly_theme') . '/panopoly_theme.profile.inc');
+  $tasks = $tasks + panopoly_theme_profile_theme_selection_install_task($install_state);
+
+  $tasks['openacademy_theme_configure_form'] = array(
+    'display_name' => t('Configure theme'),
+    'type' => 'form',
+  );
+
+  return $tasks;
+}
+
+/**
+ * Implements hook_install_tasks_alter()
+ */
+function openacademy_install_tasks_alter(&$tasks, $install_state) {
+  // Magically go one level deeper in solving years of dependency problems
+  require_once(drupal_get_path('module', 'panopoly_core') . '/panopoly_core.profile.inc');
+  $tasks['install_load_profile']['function'] = 'panopoly_core_install_load_profile';
+
+  $tasks['install_select_profile']['display'] = FALSE;
+  $tasks['install_select_locale']['display'] = FALSE;
+  $tasks['install_select_locale']['run'] = INSTALL_TASK_SKIP;
+
+  // The "Welcome" screen needs to come after the first two steps
+  // (profile and language selection), despite the fact that they are disabled.
+  $new_task['install_welcome'] = array(
+    'display' => TRUE,
+    'display_name' => st('Welcome'),
+    'type' => 'form',
+    'run' => isset($install_state['parameters']['welcome']) ? INSTALL_TASK_SKIP : INSTALL_TASK_RUN_IF_REACHED,
+  );
+  $old_tasks = $tasks;
+  $tasks = array_slice($old_tasks, 0, 2) + $new_task + array_slice($old_tasks, 2);
+
+  // Create a more fun finished page with our Open Academy Saurus
+  $tasks['install_finished']['function'] = 'openacademy_install_finished';
+  $tasks['install_finished']['display_name'] = t('Finished!');
+  $tasks['install_finished']['type'] = 'form';
+
+  _openacademy_set_theme('openacademy_maintenance');
+}
+
+/**
+ * Force-set a theme at any point during the execution of the request.
+ *
+ * Drupal doesn't give us the option to set the theme during the installation
+ * process and forces enable the maintenance theme too early in the request
+ * for us to modify it in a clean way.
+ */
+function _openacademy_set_theme($target_theme) {
+  if ($GLOBALS['theme'] != $target_theme) {
+    unset($GLOBALS['theme']);
+
+    drupal_static_reset();
+    $GLOBALS['conf']['maintenance_theme'] = $target_theme;
+    _drupal_maintenance_theme();
+  }
+}
+
+/**
+ * Task callback: shows the welcome screen.
+ */
+function install_welcome($form, &$form_state, &$install_state) {
+  drupal_set_title(st('Welcome'));
+
+  $message = '<h2>' . st('Thank you for choosing OpenAcademy!') . '</h2>';
+  $message .= '<p>' . st('This is the installer for OpenAcademy - A Drupal
+    distribution that brings the best in web publishing for higher education
+    on a customizable Drupal platform. This distribution is a flexible,
+    extendable package that lets university departments run fully functional,
+    polished websites straight out of the box.') . '</p>';
+  $message .= '<p>' . st('Critical features are provided for handling courses,
+    research publications and presentations, departmental news, faculty profiles,
+    events and more') . '</p>';
+  $message .= '<p>' . st('Open Academy is developed and maintained by !systemseed.
+  Open Academy was originally started by !chapterthree.',
+    array(
+      '!chapterthree' => l(t('Chapter Three'), 'http://chapterthree.com'),
+      '!systemseed' => l(t('SystemSeed'), 'http://systemseed.com'),
+    )) . '</p>';
+  $message .= '<p>' . st('Open Academy is built on top of the !panopoly base
+  distribution - a cleanly extendable Drupal 7 installation profile with a
+  Features-based, Kit-compliant functionality which is developed and supported
+  by !pantheon, and comes with a well documented starter theme.',
+  array(
+    '!panopoly' => l(t('Panopoly'), 'https://drupal.org/project/panopoly'),
+    '!pantheon' => l(t('Pantheon Systems'), 'https://www.getpantheon.com/'),
+  )) . '</p>';
+  $message .= '<p><em>' . st('Please note that this is a community-supported work in progress,
+    so be sure to join us over on ' . l('systemseed.com', 'http://systemseed.com/openacademy') .
+    ' and share your first impressions.') . '</em></p>';
+
+  $form = array();
+  $form['welcome_message'] = array(
+    '#markup' => $message,
+  );
+  $form['actions'] = array(
+    '#type' => 'actions',
+  );
+  $form['actions']['submit'] = array(
+    '#type' => 'submit',
+    '#value' => st("Get Started!"),
+    '#weight' => 10,
+  );
+  return $form;
+}
+
+function install_welcome_submit($form, &$form_state) {
+  global $install_state;
+
+  $install_state['parameters']['welcome'] = 'done';
+  $install_state['parameters']['locale'] = 'en';
+}
+
+/**
+ * Apps installer default content callback.
+ *
+ * Adapted from openenterprise_default_content()
+ */
+function openacademy_default_content(&$modules) {
+  // TODO: It would be better to figure out which apps have demo content modules by looking
+  // at the app manifest. Unfortunately, this doesn't qute work because the manifest doesn't
+  // know about the default content module until the app has actually been enabled, since that
+  // data only comes in from hook_apps_app_info().
+  //
+  // apps_include('manifest');
+  // $apps = apps_apps('panopoly');
+  // foreach ($modules as $module) {
+  //   if (!empty($apps[$module]['demo content module'])) {
+  //     $modules[] = $apps[$module]['demo content module'];
+  //   }
+  // }
+  //
+  // This workaround assumes a pattern MYMODULE_demo or MYMODULE_democontent which is
+	// probably not always true.
+  $files = system_rebuild_module_data();
+  foreach($modules as $module) {
+    if (isset($files[$module . '_demo'])) {
+      $modules[] = $module . '_demo';
+    }
+    elseif (isset($files[$module . '_democontent'])) {
+      $modules[] = $module . '_democontent';
+    }
+  }
+}
+
+/**
+ * Form to choose the starting theme
+ */
+function openacademy_theme_configure_form($form, &$form_state) {
+  // Set the title
+  drupal_set_title(t('Configure theme settings!'));
+
+  $theme = variable_get('theme_default');
+  ctools_include('system.admin', 'system', '');
+  $form = system_theme_settings($form, $form_state, $theme);
+  return $form;
+}
+
+/**
+ * Form to finish it all out and send us on our way
+ */
+function openacademy_install_finished($form, &$form_state) {
+  // Set the title
+  drupal_set_title(st('Congratulations!'));
+  
+  $form['openingtext'] = array(
+    '#markup' => '<h2 class="bubble">' . t('Congratulations, you just installed Open Academy!') . '<span class="tip"></span></h2>',
+  );
+
+  $form['openacademysaurus'] = array(
+    '#markup' => theme('image', array('path' => drupal_get_path('profile', 'openacademy') . '/images/openacademy_logo.png', 'attributes' => array('class' => array('openacademysaurus')))),
+  );
+
+  $form['actions'] = array(
+   '#prefix' => '<div class="form-actions">',
+   '#suffix' => '</div>',
+  );
+
+  $form['actions']['submit'] = array(
+    '#type' => 'submit',
+    '#value' => 'Take me to my site!',
+  );
+
+  return $form;
+}
+
+/**
+ * Submit form to finish it out and send us on our way!
+ */
+function openacademy_install_finished_submit($form, &$form_state) {
+  // Remember the profile which was used.
+  variable_set('install_profile', drupal_get_profile());
+  variable_set('install_task', 'done');
+
+  // Flush all caches to ensure that any full bootstraps during the installer
+  // do not leave stale cached data, and that any content types or other items
+  // registered by the install profile are registered correctly.
+  drupal_flush_all_caches();
+
+  // Install profiles are always loaded last
+  db_update('system')
+    ->fields(array('weight' => 1000))
+    ->condition('type', 'module')
+    ->condition('name', drupal_get_profile())
+    ->execute();
+
+  // Cache a fully-built schema.
+  drupal_get_schema(NULL, TRUE);
+
+  // // // Run cron to populate update status tables (if available) so that users
+  // // // will be warned if they've installed an out of date Drupal version.
+  // // // Will also trigger indexing of profile-supplied content or feeds.
+  drupal_cron_run();
+
+  if (isset($messages['error'])) {
+    $output = '<p>' . (isset($messages['error']) ? st('Review the messages above before visiting <a href="@url">your new site</a>.', array('@url' => url(''))) : st('<a href="@url">Visit your new site</a>.', array('@url' => url('')))) . '</p>';
+    return $output;
+  }
+  else {
+    // Since any module can add a drupal_set_message, this can bug the user
+    // when we redirect him to the front page. For a better user experience,
+    // remove all the message that are only "notifications" message.
+    drupal_get_messages('status', TRUE);
+    drupal_get_messages('completed', TRUE);
+
+    // If we don't install drupal using Drush, redirect the user to the front
+    // page.
+    if (!drupal_is_cli()) {
+      drupal_goto('<front>');
+    }
+  }
+}
+
+/**
+ * Implements hook_install().
+ */
+function openacademy_install() {  
+  // Enable the admin theme.
+  $admin_theme = 'unary';
+  theme_enable(array($admin_theme));
+  variable_set('admin_theme', $admin_theme);
+  variable_set('node_admin_theme', '1');
+
+  // Disable the default Bartik theme
+  theme_disable(array('bartik'));
+
+  // Enable default permissions for system roles.
+  user_role_grant_permissions(DRUPAL_ANONYMOUS_RID, array('access content'));
+  user_role_grant_permissions(DRUPAL_AUTHENTICATED_RID, array('access content'));
+
+  // Update the menu router information.
+  menu_rebuild();
+}
+
+/**
+* Helper function to adjust an array and put an element right where we want it. 
+*/
+function openacademy_maintaince_array_insert(&$array, $key, $insert_array, $before = FALSE) {
+  $done = FALSE;
+  foreach ($array as $array_key => $array_val) {
+    if (!$before) {
+      $new_array[$array_key] = $array_val;
+    }
+    if ($array_key == $key && !$done) {
+      foreach ($insert_array as $insert_array_key => $insert_array_val) {
+        $new_array[$insert_array_key] = $insert_array_val;
+      }
+      $done = TRUE;
+    }
+    if ($before) {
+      $new_array[$array_key] = $array_val;
+    }
+  }
+  if (!$done) {
+    $new_array = array_merge($array, $insert_array);
+  }
+  // Put the new array in the place of the original.
+  $array = $new_array;
+}
